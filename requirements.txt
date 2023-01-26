@@ -1,4 +1,6 @@
+numpy
 requests
 matplotlib
 pandas
 scipy
+python-dotenv
