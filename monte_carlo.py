@@ -7,28 +7,34 @@ import numpy as np
 import pandas as pd
 import scipy.stats as stats
 from dotenv import load_dotenv
+import seaborn as sns
+from matplotlib.dates import WeekdayLocator, DateFormatter
 
 
 class MonteCarloSimulation:
 
-    def __init__(self, jira_url, jira_username, jira_token, project_code, show_plots=False):
+    def __init__(self, jira_url, jira_username, jira_password, project_code, show_plots=False):
 
         self.jira_url = jira_url
         self.jira_username = jira_username
-        self.jira_token = jira_token
+        self.jira_password = jira_password
         self.project_code = project_code
         self.show_plots = show_plots
+        self.date_start = None
+        self.query_time_start = None
+        self.query_time_end = None
+        self.file_name = None
+        self.regenerate = False
 
     def _get_filtered_issues(self, params):
         issues = []
         moreResults = True
         while moreResults:
-            response = requests.get(f"{self.jira_url}/search", auth=(self.jira_username, self.jira_token),
+            response = requests.get(f"{self.jira_url}/search", auth=(self.jira_username, self.jira_password),
                                     params=params)
             # Check if the request was successful
             if response.status_code != 200:
-                raise Exception(
-                    "Error: Unable to retrieve issues from Jira API")
+                raise Exception("Error: Unable to retrieve issues from Jira API")
             # Parse the JSON data from the response
             data = json.loads(response.text)
             # Add the issues to the list
@@ -49,13 +55,11 @@ class MonteCarloSimulation:
         }
         for issue in issues:
             # Send the GET request to the Jira API and store the response in a variable
-            response = requests.get(f"{issue['self']}", auth=(
-                self.jira_username, self.jira_token), params=params)
+            response = requests.get(f"{issue['self']}", auth=(self.jira_username, self.jira_password), params=params)
 
             # Check if the request was successful
             if response.status_code != 200:
-                print(
-                    f"Error: Unable to retrieve history of changes for issue {issue}")
+                print(f"Error: Unable to retrieve history of changes for issue {issue}")
                 continue
 
             # Parse the JSON data from the response
@@ -84,49 +88,56 @@ class MonteCarloSimulation:
 
         print("\nLoaded history of changes for all issues")
 
-    def get_all_issues_data(self):
-
+    def get_all_issues_data(self, created_in_last_x_days):
         # Get the current date and calculate the start and end date for last year
         now = datetime.datetime.now()
-        last_year_start = (now - datetime.timedelta(days=365)
-                           ).strftime("%Y-%m-%d")
-        last_year_end = now.strftime("%Y-%m-%d")
+        self.query_time_start = (now - datetime.timedelta(days=created_in_last_x_days))
+
+        self.query_time_end = now
 
         # check if file in output, load from it:
-        if os.path.isfile('output/cycle_time_issues.json'):
+        self.file_name = f'output/cycle_time_issues_{self.query_time_start.strftime("%Y-%m-%d")}_' \
+                         f'{self.query_time_end.strftime("%Y-%m-%d")}.json'
+
+        if os.path.isfile(self.file_name) and not self.regenerate:
             # load dataframe from file:
-            issues_df = pd.read_json('output/cycle_time_issues.json')
+            issues_df = pd.read_json(self.file_name)
             # load into a list of jsons
             issues = issues_df.to_dict('records')
         else:
             story_point_field = [x for x in
                                  json.loads(requests.get(f"{self.jira_url}/field",
-                                                         auth=(self.jira_username, self.jira_token)).text) if
+                                                         auth=(self.jira_username, self.jira_password)).text) if
                                  "Story Points" in x['name']][0]
 
             # Define the Jira API query parameters
             params = {
                 "jql": f"project = {self.project_code}"
-                       f" and created >= {last_year_start}"
-                       f" and created <= {last_year_end}"
+                       f" and created >= {self.query_time_start.strftime('%Y-%m-%d')}"
+                       f" and created <= {self.query_time_end.strftime('%Y-%m-%d')}"
+                # and Sprint="tmMCO Sprint 2023/05" 
                        f" and status = Done"
-                       f" and (issuetype = Bug  or issuetype = Story or issuetype = Task)"
+                       f" and  (issuetype = Story or issuetype = Task)"  # (issuetype = Bug  or issuetype = Story or issuetype = Task)
                        f" and 'Story Points[Number]' is not EMPTY",
                 "fields": f"status,created,updated,resolutiondate,{story_point_field['id']}",
                 "maxResults": 10  # max limit
             }
-            issues = monte_carlo._get_filtered_issues(params)
+            issues = self._get_filtered_issues(params)
 
             # update custom field keys:
             [issue.update({'fields': {**issue['fields'], **{'story_points': issue['fields'][story_point_field['id']]}}})
              for issue in issues]
             [issue['fields'].pop(story_point_field['id']) for issue in issues]
 
-            monte_carlo._load_issues_history(issues)
+            self._load_issues_history(issues)
+
+            print(f"Storing issues into file {self.file_name}")
+            df = pd.DataFrame(issues)
+            df.to_json(monte_carlo.file_name)
 
         return issues
 
-    def calculate_cycle_times(self, issues, filter_not_in_progress=False):
+    def calculate_cycle_times(self, issues, remove_auto_done_tasks=False):
         for issue in issues:
             # Check if the issue has a 'Done' status
             if issue["fields"]["done_time"] and issue["fields"]["in_progress_time"]:
@@ -134,7 +145,7 @@ class MonteCarloSimulation:
                 cycle_time = datetime.datetime.strptime(issue["fields"]["done_time"],
                                                         "%Y-%m-%dT%H:%M:%S.%f%z") - datetime.datetime.strptime(
                     issue["fields"]["in_progress_time"], "%Y-%m-%dT%H:%M:%S.%f%z")
-            elif not filter_not_in_progress:
+            elif not remove_auto_done_tasks:
                 if issue["fields"]["todo_done_time"]:
                     cycle_time = datetime.datetime.strptime(issue["fields"]["todo_done_time"],
                                                             "%Y-%m-%dT%H:%M:%S.%f%z") - datetime.datetime.strptime(
@@ -150,86 +161,262 @@ class MonteCarloSimulation:
 
             issue["fields"]["cycle_time"] = cycle_time
         print("Calculated cycle times for all issues")
+        cycle_time_issues = [issue for issue in issues if issue["fields"]["cycle_time"]]
+        return cycle_time_issues
 
     def sample_distribution(self, issues, sample_size=10000):
-        plt.figure(figsize=(14, 8))
+        fig = plt.figure(figsize=(10, 5))
+        ax1 = fig.add_subplot(111)
+        ax2 = ax1.twinx()
 
         cycle_times = [issue["fields"]["cycle_time"].total_seconds() for issue in issues if
                        issue["fields"]["cycle_time"]]
-        cycle_times_days = [cycle_times_day /
-                            86400 for cycle_times_day in cycle_times]
+        cycle_times_days = [cycle_times_day / 86400 for cycle_times_day in cycle_times]
         real_mean = np.mean(cycle_times_days)
         real_std = np.std(cycle_times_days)
-
-        # Create a normal distribution object and PDF for real data
         dist = stats.norm(real_mean, real_std)
         x = np.linspace(-100, 100, 200)
         y = dist.pdf(x)
-        print(
-            f"REAL DATA: Mean : {real_mean} and Standard deviation : {real_std}")
-        plt.plot(x, y, color='black', linestyle='solid',
-                 label='Probability Density Function of real data')
+        print(f"REAL DATA: Mean : {real_mean} and Standard deviation : {real_std}")
+        ax2.plot(x, y, color='black', linestyle='solid', label='Probability Density Function of real data')
 
-        # Generate samples from the probability distribution generated using the cycle times
         samples = stats.norm.rvs(real_mean, real_std, size=sample_size)
-        sampled_mean = np.mean(samples)
-        sampled_std = np.std(samples)
-        print(
-            f"SAMPLES: Mean : {sampled_mean} and Standard deviation : {sampled_std}")
-        # Calculate statistics for the samples
-        t_stat, p_value = stats.ttest_ind(cycle_times_days, samples)
-        print(f"t-statistic: {t_stat}")
-        print(f"p-value: {p_value}")
-        plt.hist(samples, bins=60, density=True, rwidth=0.9,
-                 label=f'Estimated from samples with p-value = {p_value}')
+        samples = [sample for sample in samples if sample >= 0]
+        sns.histplot(data=samples, binwidth=3, label=f"{sample_size} Samples (Histogram)", ax=ax1)
 
-        # Calculate time of completing an issue based on the sample distribution with X% confidence
         confidence = 85
         confidence_sampled = np.percentile(samples, confidence)
-        plt.axvline(x=confidence_sampled, color='red', linestyle='dashed', linewidth=1,
-                    label=f'{confidence}% Confidence Interval for Sampled Data = {confidence_sampled:.2f} days')
+        ax2.axvline(x=confidence_sampled, color='red', linestyle='dashed', linewidth=1,
+                    label=f"{confidence}% Confidence Interval for Sampled Data = {confidence_sampled:.2f} days")
 
-        # Add labels and show the plot
-        plt.xlabel('Cycle Time in Days')
         plt.xlim(left=0)
+        plt.xlabel('Cycle Time in Days')
         plt.xticks(np.arange(0, 100, 5))
         plt.ylabel('Probability Density')
-        plt.legend()
+        h1, l1 = ax1.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax1.legend(h1 + h2, l1 + l2)
         plt.title(f"Cycle Time Distribution for {sample_size} Samples")
         if self.show_plots:
             plt.show()
+        plt.close()
 
-        # save to file
-        plt.savefig(f"output/cycle_time_distribution_{sample_size}.png")
+    def cycle_times_scatter_plot(self, issues, filter_cycle_time_greater_than_days=None,
+                                 filter_closed_in_x_days_start=None, filter_closed_in_x_days_end=None):
+        plt.figure(figsize=(10, 10))
+        issues = [issue for issue in issues if issue["fields"]["cycle_time"]]
+
+        # get now as utc 0
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if filter_closed_in_x_days_start is not None:
+            # filter those issues that were closed in the last x days:
+            issues = [issue for issue in issues if
+                      datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z") >=
+                      now - datetime.timedelta(days=filter_closed_in_x_days_start)]
+        if filter_closed_in_x_days_end is not None:
+            # filter those issues that were closed in the last x days:
+            issues = [issue for issue in issues if
+                      datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z") <=
+                      now - datetime.timedelta(days=filter_closed_in_x_days_end)]
+
+        cycle_times = [issue["fields"]["cycle_time"].total_seconds() for issue in issues]
+        cycle_times_days = [cycle_times_day / 86400 for cycle_times_day in cycle_times]
+
+        # get datetimes for done issues:
+        date_done_issues = [datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z")
+                            for issue in issues]
+
+        if filter_cycle_time_greater_than_days is not None:
+            cycle_times_days = [cycle_time for cycle_time in cycle_times_days
+                                if cycle_time <= filter_cycle_time_greater_than_days]
+            date_done_issues = [date_done_issue for date_done_issue, cycle_time in
+                                zip(date_done_issues, cycle_times_days)
+                                if cycle_time <= filter_cycle_time_greater_than_days]
+
+        plt.scatter(date_done_issues, cycle_times_days, s=20)
+
+        percentile = 95
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axhline(y=confidence_percentile, color='green', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+        percentile = 85
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axhline(y=confidence_percentile, color='orange', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+        percentile = 50
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axhline(y=confidence_percentile, color='red', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+
+        plt.xlabel('Date')
+        plt.xticks(rotation=90)
+        # display only one date per week in x axis:
+        from matplotlib.dates import MO, TU, WE, TH, FR, SA, SU
+        # plot x labels once per week:
+        plt.gca().xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+        plt.gca().xaxis.set_major_locator(WeekdayLocator(byweekday=(TH)))
+
+        plt.ylabel('Cycle Time in Days')
+        plt.legend()
+
+        data_start_date = self.query_time_start
+        data_end_date = self.query_time_end
+
+        if filter_closed_in_x_days_start is not None:
+            data_start_date = self.query_time_end - datetime.timedelta(days=filter_closed_in_x_days_start)
+
+        if filter_closed_in_x_days_end is not None:
+            data_end_date = self.query_time_end - datetime.timedelta(days=filter_closed_in_x_days_end)
+
+        # get min and max date of done issues:
+        data_max_date = max(date_done_issues)
+        data_min_date = min(date_done_issues)
+        plt.xlim(left=data_min_date, right=data_max_date)
+
+        plt.title(
+            f"Cycle Time Scatter Plot for {len(cycle_times_days)} completed tasks "
+            f"(Estimated Stories/Tasks) from {data_start_date.strftime('%Y-%m-%d')} to"
+            f" {data_end_date.strftime('%Y-%m-%d')}")
+
+        plt.savefig(f"output/cycle_times_scatter_plot{data_start_date.strftime('%Y-%m-%d')}-"
+                    f"{data_end_date.strftime('%Y-%m-%d')}.png")
+        if self.show_plots:
+            plt.show()
+        plt.close()
+
+    def cycle_times_distribution_plot(self, issues, filter_cycle_time_greater_than_days=None,
+                                      filter_closed_in_x_days_start=None, filter_closed_in_x_days_end=None):
+        plt.figure(figsize=(10, 5))
+
+        # get now as utc 0
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if filter_closed_in_x_days_start is not None:
+            # filter those issues that were closed in the last x days:
+            issues = [issue for issue in issues if
+                      datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z") >=
+                      now - datetime.timedelta(days=filter_closed_in_x_days_start)]
+        if filter_closed_in_x_days_end is not None:
+            # filter those issues that were closed in the last x days:
+            issues = [issue for issue in issues if
+                      datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z") <=
+                      now - datetime.timedelta(days=filter_closed_in_x_days_end)]
+
+        cycle_times = [issue["fields"]["cycle_time"].total_seconds() for issue in issues if
+                       issue["fields"]["cycle_time"]]
+        cycle_times_days = [cycle_times_day / 86400 for cycle_times_day in cycle_times]
+
+        if filter_cycle_time_greater_than_days is not None:
+            cycle_times_days = [cycle_time for cycle_time in cycle_times_days
+                                if cycle_time <= filter_cycle_time_greater_than_days]
+
+        num_bins = int((max(cycle_times_days) - min(cycle_times_days)) / 2)
+        values, bins, bars = plt.hist(cycle_times_days, bins=num_bins, rwidth=0.9,
+                                      label=f"Histogram of Task cycle times")
+        plt.bar_label(bars, fontsize=10)
+
+        percentile = 95
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axvline(x=confidence_percentile, color='green', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+        percentile = 85
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axvline(x=confidence_percentile, color='orange', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+        percentile = 50
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axvline(x=confidence_percentile, color='red', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+
+        plt.xlim(left=0, right=filter_cycle_time_greater_than_days)
+        plt.xlabel('Cycle Time in Days')
+        plt.xticks(np.arange(0, 100, 5))
+        plt.ylabel('Number of Tasks')
+        plt.legend()
+
+        data_start_date = self.query_time_start
+        data_end_date = self.query_time_end
+
+        if filter_closed_in_x_days_start is not None:
+            data_start_date = self.query_time_end - datetime.timedelta(days=filter_closed_in_x_days_start)
+
+        if filter_closed_in_x_days_end is not None:
+            data_end_date = self.query_time_end - datetime.timedelta(days=filter_closed_in_x_days_end)
+
+        plt.title(
+            f"Cycle Time Distribution for {len(cycle_times_days)} completed tasks "
+            f"(Estimated Stories/Tasks) from {data_start_date.strftime('%Y-%m-%d')} to"
+            f" {data_end_date.strftime('%Y-%m-%d')}")
+
+        plt.savefig(f"output/cycle_times_distribution_plot_{data_start_date.strftime('%Y-%m-%d')}-"
+                    f"{self.query_time_end.strftime('%Y-%m-%d')}.png")
+        if self.show_plots:
+            plt.show()
+        plt.close()
+
+    def _sample_distribution_percentile(self, issues, filter_greater_than_days=None):
+        min_done_date = min([issue["fields"]["done_time"] for issue in issues if issue["fields"]["done_time"]])
+        min_done_date = datetime.datetime.strptime(min_done_date, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
+        max_done_date = max([issue["fields"]["done_time"] for issue in issues if issue["fields"]["done_time"]])
+        max_done_date = datetime.datetime.strptime(max_done_date, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%d/%m/%Y")
+
+        plt.figure(figsize=(10, 5))
+        cycle_times = [issue["fields"]["cycle_time"].total_seconds() for issue in issues if
+                       issue["fields"]["cycle_time"]]
+        cycle_times_days = [cycle_times_day / 86400 for cycle_times_day in cycle_times]
+        if filter_greater_than_days:
+            cycle_times_days = [cycle_time for cycle_time in cycle_times_days if cycle_time <= filter_greater_than_days]
+
+        num_bins = int((max(cycle_times_days) - min(cycle_times_days)) / 2)
+        values, bins, bars = plt.hist(cycle_times_days, bins=num_bins, rwidth=0.9,
+                                      label=f"Histogram of Task cycle times")
+        plt.bar_label(bars, fontsize=10)
+
+        percentile = 95
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axvline(x=confidence_percentile, color='green', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+        percentile = 85
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axvline(x=confidence_percentile, color='orange', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+        percentile = 50
+        confidence_percentile = np.percentile(cycle_times_days, percentile)
+        plt.axvline(x=confidence_percentile, color='red', linestyle='dashed', linewidth=1,
+                    label=f"{percentile}% Percentile for Task completion = {confidence_percentile:.2f} days")
+
+        plt.xlim(left=0, right=filter_greater_than_days)
+        plt.xlabel('Cycle Time in Days')
+        plt.xticks(np.arange(0, 100, 5))
+        plt.ylabel('Number of Tasks')
+        plt.legend()
+        plt.title(
+            f"Cycle Time Distribution for {len(cycle_times_days)} completed tasks "
+            f"(Estimated Stories/Tasks) from {min_done_date} to {max_done_date}")
+        if self.show_plots:
+            plt.show()
         plt.close()
 
     def get_story_points_relationship(self, issues):
         plt.figure(figsize=(14, 8))
-        story_points = [issue["fields"]["story_points"]
-                        for issue in issues if issue["fields"]["story_points"]]
+        story_points = [issue["fields"]["story_points"] for issue in issues if issue["fields"]["story_points"] and
+                        issue["fields"]["cycle_time"]]
         cycle_times = [issue["fields"]["cycle_time"].total_seconds() for issue in issues if
-                       issue["fields"]["cycle_time"]]
-        cycle_times_days = [cycle_times_day /
-                            86400 for cycle_times_day in cycle_times]
+                       issue["fields"]["story_points"] and issue["fields"]["cycle_time"]]
+        cycle_times_days = [cycle_times_day / 86400 for cycle_times_day in cycle_times]
         plt.scatter(story_points, cycle_times_days)
 
         # add a linear regression
-        slope, intercept, r_value, p_value, std_err = stats.linregress(
-            story_points, cycle_times_days)
+        slope, intercept, r_value, p_value, std_err = stats.linregress(story_points, cycle_times_days)
         line = slope * np.array(story_points) + intercept
         plt.plot(story_points, line, 'r-', label='Regression line')
 
         plt.xticks([1, 2, 3, 5, 8, 13, 20])
         plt.xlabel('Story Points')
         plt.ylabel('Cycle Time in Days')
-        plt.title(
-            "Cycle Time vs Story Points (R^2= {:.2f})".format(r_value ** 2))
-
+        plt.title("Cycle Time vs Story Points (R^2= {:.2f})".format(r_value ** 2))
+        plt.savefig("output/cycle_time_vs_story_points.png")
         if self.show_plots:
             plt.show()
-
-        # save to file
-        plt.savefig("output/cycle_time_vs_story_points.png")
         plt.close()
 
 
@@ -239,22 +426,28 @@ if __name__ == "__main__":
     # Jira API endpoint and credentials
     jira_url = os.environ.get("JIRA_URL")
     jira_username = os.environ.get("JIRA_USER")
-    jira_token = os.environ.get("jira_token")
+    jira_password = os.environ.get("JIRA_PASSWORD")
     project_code = os.environ.get("JIRA_PROJECT_CODE")
 
-    monte_carlo = MonteCarloSimulation(
-        jira_url, jira_username, jira_token, project_code, show_plots=True)
+    monte_carlo = MonteCarloSimulation(jira_url, jira_username, jira_password, project_code, show_plots=True)
+    monte_carlo.regenerate = False
 
-    issues = monte_carlo.get_all_issues_data()
+    issues = monte_carlo.get_all_issues_data(created_in_last_x_days=365)
 
-    monte_carlo.calculate_cycle_times(issues, filter_not_in_progress=False)
+    cycle_time_issues = monte_carlo.calculate_cycle_times(issues, remove_auto_done_tasks=True)
 
-    cycle_time_issues = [
-        issue for issue in issues if issue["fields"]["cycle_time"]]
+    filter_cycle_time_greater_than_days = None
+    filter_closed_in_x_days_start = 60
+    filter_closed_in_x_days_end = 30
 
-    df = pd.DataFrame(cycle_time_issues)
-    df.to_json("output/cycle_time_issues.json")
+    monte_carlo.cycle_times_scatter_plot(issues,
+                                         filter_cycle_time_greater_than_days=filter_cycle_time_greater_than_days,
+                                         filter_closed_in_x_days_start=filter_closed_in_x_days_start,
+                                         filter_closed_in_x_days_end=filter_closed_in_x_days_end)
 
-    monte_carlo.sample_distribution(cycle_time_issues, sample_size=1000000)
+    monte_carlo.cycle_times_distribution_plot(issues,
+                                              filter_cycle_time_greater_than_days=filter_cycle_time_greater_than_days,
+                                              filter_closed_in_x_days_start=filter_closed_in_x_days_start,
+                                              filter_closed_in_x_days_end=filter_closed_in_x_days_end)
 
-    monte_carlo.get_story_points_relationship(cycle_time_issues)
+    # monte_carlo.get_story_points_relationship(cycle_time_issues)
