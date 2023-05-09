@@ -163,7 +163,7 @@ class MonteCarloSimulation:
             issue["fields"]["cycle_time"] = cycle_time
         print("Calculated cycle times for all issues")
         cycle_time_issues = [issue for issue in issues if issue["fields"]["cycle_time"]]
-        return cycle_time_issues
+        return issues, cycle_time_issues
 
     def sample_distribution(self, issues, sample_size=10000):
         fig = plt.figure(figsize=(10, 5))
@@ -480,7 +480,8 @@ if __name__ == "__main__":
 
     issues = monte_carlo.get_all_issues_data(created_in_last_x_days=args.created_since_days)
 
-    cycle_time_issues = monte_carlo.calculate_cycle_times(issues, remove_auto_done_tasks=args.remove_auto_done_pbis)
+    issues, cycle_time_issues = monte_carlo.calculate_cycle_times(issues,
+                                                                  remove_auto_done_tasks=args.remove_auto_done_pbis)
 
     filter_cycle_time_greater_than_days = args.cycle_time_greater_than_days
 
