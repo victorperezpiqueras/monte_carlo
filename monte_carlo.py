@@ -1,3 +1,4 @@
+import argparse
 import os
 import requests
 import json
@@ -202,19 +203,20 @@ class MonteCarloSimulation:
         plt.close()
 
     def cycle_times_scatter_plot(self, issues, filter_cycle_time_greater_than_days=None,
-                                 filter_closed_in_x_days_start=None, filter_closed_in_x_days_end=None):
+                                 filter_closed_in_x_days_start=None, filter_closed_in_x_days_end=None,
+                                 show_labels=False):
         plt.figure(figsize=(10, 10))
         issues = [issue for issue in issues if issue["fields"]["cycle_time"]]
 
         # get now as utc 0
         now = datetime.datetime.now(datetime.timezone.utc)
         if filter_closed_in_x_days_start is not None:
-            # filter those issues that were closed in the last x days:
+            # keep issues that were closed before today - X days:
             issues = [issue for issue in issues if
                       datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z") >=
                       now - datetime.timedelta(days=filter_closed_in_x_days_start)]
         if filter_closed_in_x_days_end is not None:
-            # filter those issues that were closed in the last x days:
+            # keep issues that were closed after today - Y days:
             issues = [issue for issue in issues if
                       datetime.datetime.strptime(issue["fields"]["done_time"], "%Y-%m-%dT%H:%M:%S.%f%z") <=
                       now - datetime.timedelta(days=filter_closed_in_x_days_end)]
@@ -227,6 +229,8 @@ class MonteCarloSimulation:
                             for issue in issues]
 
         if filter_cycle_time_greater_than_days is not None:
+            issues = [issue for issue, cycle_time in zip(issues, cycle_times_days)
+                      if cycle_time <= filter_cycle_time_greater_than_days]
             cycle_times_days = [cycle_time for cycle_time in cycle_times_days
                                 if cycle_time <= filter_cycle_time_greater_than_days]
             date_done_issues = [date_done_issue for date_done_issue, cycle_time in
@@ -234,6 +238,11 @@ class MonteCarloSimulation:
                                 if cycle_time <= filter_cycle_time_greater_than_days]
 
         plt.scatter(date_done_issues, cycle_times_days, s=20)
+
+        if show_labels:
+            # put issue keys on points:
+            for i, txt in enumerate(cycle_times_days):
+                plt.annotate(issues[i]["key"], (date_done_issues[i], cycle_times_days[i]))
 
         percentile = 95
         confidence_percentile = np.percentile(cycle_times_days, percentile)
@@ -269,8 +278,8 @@ class MonteCarloSimulation:
             data_end_date = self.query_time_end - datetime.timedelta(days=filter_closed_in_x_days_end)
 
         # get min and max date of done issues:
-        data_max_date = max(date_done_issues)
-        data_min_date = min(date_done_issues)
+        data_max_date = max(date_done_issues) + datetime.timedelta(days=5)
+        data_min_date = min(date_done_issues) - datetime.timedelta(days=5)
         plt.xlim(left=data_min_date, right=data_max_date)
 
         plt.title(
@@ -278,7 +287,7 @@ class MonteCarloSimulation:
             f"(Estimated Stories/Tasks) from {data_start_date.strftime('%Y-%m-%d')} to"
             f" {data_end_date.strftime('%Y-%m-%d')}")
 
-        plt.savefig(f"output/cycle_times_scatter_plot{data_start_date.strftime('%Y-%m-%d')}-"
+        plt.savefig(f"output/cycle_times_scatter_plot_{data_start_date.strftime('%Y-%m-%d')}-"
                     f"{data_end_date.strftime('%Y-%m-%d')}.png")
         if self.show_plots:
             plt.show()
@@ -348,7 +357,7 @@ class MonteCarloSimulation:
             f" {data_end_date.strftime('%Y-%m-%d')}")
 
         plt.savefig(f"output/cycle_times_distribution_plot_{data_start_date.strftime('%Y-%m-%d')}-"
-                    f"{self.query_time_end.strftime('%Y-%m-%d')}.png")
+                    f"{data_end_date.strftime('%Y-%m-%d')}.png")
         if self.show_plots:
             plt.show()
         plt.close()
@@ -429,25 +438,70 @@ if __name__ == "__main__":
     jira_password = os.environ.get("JIRA_PASSWORD")
     project_code = os.environ.get("JIRA_PROJECT_CODE")
 
+    # read params from command line
+    parser = argparse.ArgumentParser(description='Monte Carlo Simulation for Jira')
+    parser.add_argument('--regenerate', '-r', action='store_true',
+                        help='Request data to Jira API again')
+    parser.add_argument('--cycle_time_greater_than_days', '-ctgtd', type=int, default=None,
+                        help='Filter cycle times greater than days')
+    parser.add_argument('--pbis-subset', '-p', type=str, default="last_month",
+                        help='Filter issues that were closed: [last_month, previous_month, all]')
+    parser.add_argument('--remove-auto-done-pbis', '-radp', action='store_true',
+                        help='Filter issues that were moved from To Do to Done directly without In Progress')
+    parser.add_argument('--created_since_days', '-csd', type=int, default=365,
+                        help='Filter issues that were created in the last X days')
+    parser.add_argument('--show_scatter', '-ss', action='store_true',
+                        help='Show scatter plot for cycle time')
+    parser.add_argument('--show_scatter_labels', '-ssl', action='store_true',
+                        help='Show issues keys in scatter plot for cycle time')
+    parser.add_argument('--show_hist', '-sh', action='store_true',
+                        help='Show hist plot for cycle time')
+    parser.add_argument('--show_cycle_vs_sps', '-scvs', action='store_true',
+                        help='Show cycle time vs story points plot')
+
+    args = parser.parse_args()
+
+    print("-----------------------------------")
+    print("Running Monte Carlo Simulation for Jira with the following parameters:")
+    print(f"  - Regenerate data from Jira API: {args.regenerate}")
+    print(f"  - Filter cycle times greater than days: {args.cycle_time_greater_than_days}")
+    print(f"  - Filter issues that were closed: {args.pbis_subset}")
+    print(f"  - Filter issues that were moved from To Do to Done"
+          f" directly without In Progress: {args.remove_auto_done_pbis}")
+    print(f"  - Filter issues that were created in the last X days: {args.created_since_days}")
+    print(f"  - Show scatter plot for cycle time: {args.show_scatter}")
+    print(f"  - Show scatter plot labels for cycle time: {args.show_scatter_labels}")
+    print(f"  - Show hist plot for cycle time: {args.show_hist}")
+    print(f"  - Show cycle time vs story points plot: {args.show_cycle_vs_sps}")
+    print("-----------------------------------")
+
     monte_carlo = MonteCarloSimulation(jira_url, jira_username, jira_password, project_code, show_plots=True)
-    monte_carlo.regenerate = False
+    monte_carlo.regenerate = args.regenerate
 
-    issues = monte_carlo.get_all_issues_data(created_in_last_x_days=365)
+    issues = monte_carlo.get_all_issues_data(created_in_last_x_days=args.created_since_days)
 
-    cycle_time_issues = monte_carlo.calculate_cycle_times(issues, remove_auto_done_tasks=True)
+    cycle_time_issues = monte_carlo.calculate_cycle_times(issues, remove_auto_done_tasks=args.remove_auto_done_pbis)
 
-    filter_cycle_time_greater_than_days = None
-    filter_closed_in_x_days_start = 60
-    filter_closed_in_x_days_end = 30
+    filter_cycle_time_greater_than_days = args.cycle_time_greater_than_days
 
-    monte_carlo.cycle_times_scatter_plot(issues,
-                                         filter_cycle_time_greater_than_days=filter_cycle_time_greater_than_days,
-                                         filter_closed_in_x_days_start=filter_closed_in_x_days_start,
-                                         filter_closed_in_x_days_end=filter_closed_in_x_days_end)
+    if args.pbis_subset == "last_month":
+        filter_closed_in_x_days_start, filter_closed_in_x_days_end = 30, 0
+    elif args.pbis_subset == "previous_month":
+        filter_closed_in_x_days_start, filter_closed_in_x_days_end = 60, 30
+    else:
+        filter_closed_in_x_days_start, filter_closed_in_x_days_end = None, None
 
-    monte_carlo.cycle_times_distribution_plot(issues,
-                                              filter_cycle_time_greater_than_days=filter_cycle_time_greater_than_days,
-                                              filter_closed_in_x_days_start=filter_closed_in_x_days_start,
-                                              filter_closed_in_x_days_end=filter_closed_in_x_days_end)
+    if args.show_scatter:
+        monte_carlo.cycle_times_scatter_plot(issues,
+                                             filter_cycle_time_greater_than_days=filter_cycle_time_greater_than_days,
+                                             filter_closed_in_x_days_start=filter_closed_in_x_days_start,
+                                             filter_closed_in_x_days_end=filter_closed_in_x_days_end,
+                                             show_labels=args.show_scatter_labels)
+    if args.show_hist:
+        monte_carlo.cycle_times_distribution_plot(issues,
+                                                  filter_cycle_time_greater_than_days=filter_cycle_time_greater_than_days,
+                                                  filter_closed_in_x_days_start=filter_closed_in_x_days_start,
+                                                  filter_closed_in_x_days_end=filter_closed_in_x_days_end)
 
-    # monte_carlo.get_story_points_relationship(cycle_time_issues)
+    if args.show_cycle_vs_sps:
+        monte_carlo.get_story_points_relationship(cycle_time_issues)
