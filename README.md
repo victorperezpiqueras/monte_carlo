@@ -11,6 +11,8 @@ To get started, you'll need to create a .env file in the root directory of this 
 - `JIRA_TOKEN`: Your Jira token. Find how to create it [here](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/).
 - `JIRA_PROJECT_CODE`: The code of the project you want to analyze
 
+You also need to create an `output` folder in the root, where the data generated will be stored.
+
 ## Running the code
 
 To run the code, simply execute the following command:
