@@ -120,7 +120,7 @@ class MonteCarloSimulation:
                        f" and status = Done"
                        f" and  (issuetype = Story or issuetype = Task)"  # (issuetype = Bug  or issuetype = Story or issuetype = Task)
                        f" and 'Story Points[Number]' is not EMPTY",
-                "fields": f"status,created,updated,resolutiondate,{story_point_field['id']}",
+                "fields": f"summary,status,created,updated,resolutiondate,{story_point_field['id']}",
                 "maxResults": 10  # max limit
             }
             issues = self._get_filtered_issues(params)
@@ -242,7 +242,10 @@ class MonteCarloSimulation:
         if show_labels:
             # put issue keys on points:
             for i, txt in enumerate(cycle_times_days):
-                plt.annotate(issues[i]["key"], (date_done_issues[i], cycle_times_days[i]))
+                # abreviate summary if more than 20chars with ...
+                summary = issues[i]['fields']['summary'][:30] + "..."
+                label = f"{issues[i]['key']} ({issues[i]['fields']['story_points']}) {summary}"
+                plt.annotate(label, (date_done_issues[i], cycle_times_days[i]))
 
         percentile = 95
         confidence_percentile = np.percentile(cycle_times_days, percentile)
